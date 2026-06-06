@@ -1,0 +1,17 @@
+[project]
+name = "cryptobot"
+version = "1.0.0"
+description = "Telegram bot for encryption, decryption, and hashing"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.7,<4",
+    "pydantic-settings>=2,<3",
+    "cryptography>=42,<44",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command, CommandStart
@@ -46,9 +47,32 @@ from .utils import (
     truncate,
     with_footer,
 )
+from .data_store import (
+    ban_user,
+    get_activity,
+    get_bans,
+    get_stats,
+    get_users,
+    is_banned,
+    record_operation,
+    register_user,
+    unban_user,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+# ── Ban middleware ─────────────────────────────────────────────────────────────
+
+@router.message.outer_middleware()
+async def ban_check(handler, event: types.Message, data):
+    uid = event.from_user.id if event.from_user else None
+    if uid and is_banned(uid):
+        if event.text and event.text.startswith("/start"):
+            await event.answer("🚫 You have been blocked from using this bot.")
+        return  # silently ignore
+    return await handler(event, data)
 
 
 # ── States ────────────────────────────────────────────────────────────────────
@@ -110,6 +134,7 @@ Upload an encrypted file → enter the password → get the original.
 @router.message(CommandStart())
 async def cmd_start(message: types.Message) -> None:
     clear_session(message.from_user.id)
+    register_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     await message.answer(with_footer(WELCOME), reply_markup=main_keyboard, parse_mode="HTML")
 
 
@@ -130,6 +155,122 @@ async def btn_channel(message: types.Message) -> None:
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+
+
+# ── Admin commands ────────────────────────────────────────────────────────────
+
+def _is_admin(user_id: int) -> bool:
+    return user_id in settings.admin_ids
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: types.Message) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    stats = get_stats()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_data = stats["daily"].get(today, {"operations": 0, "users": []})
+    bans = get_bans()
+
+    # Last 7 days
+    now = datetime.now(timezone.utc)
+    week_lines: list[str] = []
+    for i in range(7):
+        day = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        d = stats["daily"].get(day, {"operations": 0, "users": []})
+        week_lines.append(f"  {day}: {d['operations']} ops, {len(d['users'])} users")
+
+    text = (
+        f"📊 <b>CipherX Stats</b>\n\n"
+        f"🔢 Total operations: <b>{stats['total_operations']}</b>\n"
+        f"👥 Unique users: <b>{len(stats['unique_users'])}</b>\n"
+        f"🚫 Banned users: <b>{len(bans)}</b>\n\n"
+        f"📅 <b>Today ({today})</b>\n"
+        f"  Operations: {today_data['operations']}\n"
+        f"  Active users: {len(today_data['users'])}\n\n"
+        f"📆 <b>Last 7 days</b>\n" + "\n".join(week_lines)
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("users"))
+async def cmd_users(message: types.Message) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    users = get_users()
+    if not users:
+        await message.answer("👥 No users yet.")
+        return
+
+    # Sort by last_seen descending
+    sorted_users = sorted(users.items(), key=lambda x: x[1].get("last_seen", ""), reverse=True)
+    lines: list[str] = ["👥 <b>Recent Users</b>\n"]
+    for uid, info in sorted_users[:20]:
+        name = info.get("first_name") or info.get("username") or uid
+        uname = f"@{info['username']}" if info.get("username") else ""
+        ops = info.get("operations", 0)
+        lines.append(f"• <b>{name}</b> {uname} — {ops} ops (ID: <code>{uid}</code>)")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("history"))
+async def cmd_history(message: types.Message) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    activity = get_activity()
+    if not activity:
+        await message.answer("📜 No activity yet.")
+        return
+
+    lines: list[str] = ["📜 <b>Recent Activity</b>\n"]
+    for entry in activity[:20]:
+        icon = "✅" if entry["success"] else "❌"
+        ts = entry.get("ts", "?")[:19]
+        lines.append(f"{icon} <code>{entry['user_id']}</code> — {entry['op']} ({entry['method']}) — {ts}")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: types.Message) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Usage: /ban <user_id>")
+        return
+    try:
+        target = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Invalid user ID.")
+        return
+    if target in settings.admin_ids:
+        await message.answer("❌ Cannot ban an admin.")
+        return
+    if ban_user(target):
+        await message.answer(f"🚫 User <code>{target}</code> banned.", parse_mode="HTML")
+    else:
+        await message.answer(f"⚠️ User <code>{target}</code> is already banned.", parse_mode="HTML")
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: types.Message) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Usage: /unban <user_id>")
+        return
+    try:
+        target = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Invalid user ID.")
+        return
+    if unban_user(target):
+        await message.answer(f"✅ User <code>{target}</code> unbanned.", parse_mode="HTML")
+    else:
+        await message.answer(f"⚠️ User <code>{target}</code> is not banned.", parse_mode="HTML")
 
 
 # ── Encrypt Text Flow ────────────────────────────────────────────────────────
@@ -408,6 +549,7 @@ async def process_file_password(message: types.Message, state: FSMContext) -> No
 
         result = file_encrypt(data, password)
         if not result.success:
+            record_operation(uid, "file_encrypt", "aes256", False)
             await message.answer(result.error)
             clear_session(uid)
             await state.clear()
@@ -424,6 +566,7 @@ async def process_file_password(message: types.Message, state: FSMContext) -> No
             caption=with_footer("✅ File encrypted with AES-256-GCM"),
         )
         os.remove(enc_path)
+        record_operation(uid, "file_encrypt", "aes256", True)
 
     else:
         # Read encrypted file, decrypt
@@ -432,6 +575,7 @@ async def process_file_password(message: types.Message, state: FSMContext) -> No
 
         data, err = file_decrypt(payload, password)
         if err:
+            record_operation(uid, "file_decrypt", "aes256", False)
             await message.answer(err)
             clear_session(uid)
             await state.clear()
@@ -452,6 +596,7 @@ async def process_file_password(message: types.Message, state: FSMContext) -> No
             caption=with_footer("✅ File decrypted successfully"),
         )
         os.remove(dec_path)
+        record_operation(uid, "file_decrypt", "aes256", True)
 
     clear_session(uid)
     await state.clear()
@@ -506,11 +651,13 @@ async def process_text_input(message: types.Message, state: FSMContext) -> None:
     if sess.action == "hash_text":
         hr = hash_text(text, sess.method)
         if hasattr(hr, "hex_digest"):
+            record_operation(uid, "hash", sess.method, True)
             await message.answer(
                 with_footer(format_hash_result(hr.algorithm, hr.hex_digest)),
                 parse_mode="HTML",
             )
         else:
+            record_operation(uid, "hash", sess.method, False)
             await message.answer(hr.error)
         clear_session(uid)
         await state.clear()
@@ -520,11 +667,13 @@ async def process_text_input(message: types.Message, state: FSMContext) -> None:
     if sess.action == "hmac_text":
         result = hmac_text(text, sess.password, sess.method)
         if result.success:
+            record_operation(uid, "hmac", sess.method, True)
             await message.answer(
                 with_footer(f"🔐 <b>HMAC-{sess.method.upper()}</b>\n\n<code>{result.data}</code>"),
                 parse_mode="HTML",
             )
         else:
+            record_operation(uid, "hmac", sess.method, False)
             await message.answer(result.error)
         clear_session(uid)
         await state.clear()
@@ -591,14 +740,17 @@ def _decrypt_with_password(method: str, text: str, password: str):
 
 
 async def _send_result(message: types.Message, result, method: str, verb: str) -> None:
+    uid = message.from_user.id
     if result is None:
         await message.answer("❌ Unknown method.")
         return
     if not result.success:
+        record_operation(uid, verb.lower(), method, False)
         await message.answer(result.error)
         return
 
     data = truncate(result.data)
+    record_operation(uid, verb.lower(), method, True)
     await message.answer(
         with_footer(f"✅ <b>{verb}</b> ({method.upper()})\n\n{code_block(data)}"),
         parse_mode="HTML",
@@ -630,12 +782,31 @@ async def fallback(message: types.Message, state: FSMContext) -> None:
 # ── Bot setup ────────────────────────────────────────────────────────────────
 
 async def set_commands(bot: Bot) -> None:
+    from aiogram.types import BotCommandScopeChat, BotCommandScopeDefault
+
     commands = [
         BotCommand(command="start", description="🚀 Start the bot"),
         BotCommand(command="help", description="📖 How to use"),
         BotCommand(command="cancel", description="❌ Cancel current operation"),
     ]
-    await bot.set_my_commands(commands)
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+
+    # Admin-only commands
+    admin_commands = commands + [
+        BotCommand(command="stats", description="📊 Bot statistics"),
+        BotCommand(command="users", description="👥 Recent users"),
+        BotCommand(command="history", description="📜 Recent activity"),
+        BotCommand(command="ban", description="🚫 Ban a user"),
+        BotCommand(command="unban", description="✅ Unban a user"),
+    ]
+    for admin_id in settings.admin_ids:
+        try:
+            await bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScopeChat(chat_id=admin_id),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to set admin commands for {admin_id}: {e}")
 
 
 def create_dispatcher() -> Dispatcher:

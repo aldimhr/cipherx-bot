@@ -58,7 +58,14 @@ from .data_store import (
     register_user,
     unban_user,
 )
-
+from .donate import (
+    DONATE_TEXT,
+    donation_keyboard,
+    get_donations,
+    handle_donate_callback,
+    log_donation,
+    send_invoice,
+)
 logger = logging.getLogger(__name__)
 router = Router()
 
@@ -120,6 +127,8 @@ Upload a file → enter a password → get the encrypted file back.
 
 <b>📂 Decrypt File</b>
 Upload an encrypted file → enter the password → get the original.
+<b>💰 Support</b>
+Donate Telegram Stars to support the bot's development.
 
 <b>Supported Methods:</b>
 • <b>AES-256</b> — military-grade symmetric encryption (password required)
@@ -154,6 +163,48 @@ async def btn_channel(message: types.Message) -> None:
         "📢 Join <b>@x0projects</b> for updates & new bots!\n\nhttps://t.me/x0projects",
         parse_mode="HTML",
         disable_web_page_preview=True,
+    )
+
+
+# ── Donate ────────────────────────────────────────────────────────────────────
+
+@router.message(F.text == "💰 Support")
+@router.message(Command("donate"))
+async def cmd_donate(message: types.Message) -> None:
+    parts = message.text.split()
+    if len(parts) >= 2:
+        try:
+            amount = int(parts[1])
+            if 1 <= amount <= 10000:
+                ok = await send_invoice(message.bot, message.chat.id, amount, message.message_id)
+                if not ok:
+                    await message.answer("❌ Failed to create invoice. Please try again.")
+                return
+        except ValueError:
+            pass
+    await message.answer(DONATE_TEXT, reply_markup=donation_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("donate:"))
+async def cb_donate(callback: types.CallbackQuery) -> None:
+    await handle_donate_callback(callback, callback.bot)
+
+
+@router.pre_checkout_query()
+async def on_pre_checkout(query: types.PreCheckoutQuery) -> None:
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def on_successful_payment(message: types.Message) -> None:
+    payment = message.successful_payment
+    stars = payment.total_amount
+    log_donation(message.from_user.id, stars)
+    await message.answer(
+        f"🎉 <b>Thank you for your donation!</b>\n\n"
+        f"You donated <b>{stars} Stars</b> ⭐\n\n"
+        f"Your support keeps this bot running! 💙",
+        parse_mode="HTML",
     )
 
 
@@ -787,6 +838,7 @@ async def set_commands(bot: Bot) -> None:
     commands = [
         BotCommand(command="start", description="🚀 Start the bot"),
         BotCommand(command="help", description="📖 How to use"),
+        BotCommand(command="donate", description="⭐ Support with Stars"),
         BotCommand(command="cancel", description="❌ Cancel current operation"),
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())

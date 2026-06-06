@@ -15,7 +15,7 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="🔐 Encrypt Text"), KeyboardButton(text="🔓 Decrypt Text")],
         [KeyboardButton(text="#️⃣ Hash Text"), KeyboardButton(text="🔑 Generate Password")],
         [KeyboardButton(text="📁 Encrypt File"), KeyboardButton(text="📂 Decrypt File")],
-        [KeyboardButton(text="ℹ️ Help"), KeyboardButton(text="📢 Channel")],
+        [KeyboardButton(text="💰 Support"), KeyboardButton(text="ℹ️ Help"), KeyboardButton(text="📢 Channel")],
     ],
     resize_keyboard=True,
     input_field_placeholder="Choose an action…",
